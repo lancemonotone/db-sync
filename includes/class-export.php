@@ -4,6 +4,8 @@
  * Export functionality for Database Sync plugin
  */
 
+// No external dependencies needed - using WordPress native methods
+
 class DatabaseSync_Export {
 
     /**
@@ -31,14 +33,13 @@ class DatabaseSync_Export {
         update_option('db_sync_tables', $tables_to_export);
 
         // Generate SQL file  
-        error_log('*** DB Sync Export: Using fixed escaping logic');
         $sql_content = $this->generate_sql($tables_to_export);
 
-        // Create descriptive filename
-        $date = date('ymd'); // YYMMDD format
+        // Create descriptive filename with timestamp
+        $timestamp = date('ymd-His'); // YYMMDD-HHMMSS format
         $preset_name = $this->get_preset_display_name($preset);
         $environment = $this->get_environment_name();
-        $filename = $date . '-' . strtolower(str_replace(' ', '-', $preset_name)) . '-' . strtolower($environment) . '.sql';
+        $filename = $timestamp . '-' . strtolower(str_replace(' ', '-', $preset_name)) . '-' . strtolower($environment) . '.sql';
 
         // Ensure uploads directory exists
         $upload_dir = wp_upload_dir();
@@ -83,15 +84,18 @@ class DatabaseSync_Export {
     }
 
     /**
-     * Generate SQL content
+     * Generate SQL content using WordPress native methods
      */
     private function generate_sql($tables) {
         global $wpdb;
 
+        // Add our custom header
         $sql_content = "-- WordPress Database Export\n";
         $sql_content .= "-- Generated: " . date('Y-m-d H:i:s') . "\n";
-        $sql_content .= "-- Source URL: " . get_option('siteurl') . "\n\n";
+        $sql_content .= "-- Source URL: " . get_option('siteurl') . "\n";
+        $sql_content .= "-- Exported tables: " . implode(', ', $tables) . "\n\n";
 
+        // Get the actual table names for the selected tables
         $available_tables = DatabaseSync::get_available_tables();
 
         foreach ($tables as $table_display) {
@@ -111,57 +115,56 @@ class DatabaseSync_Export {
             $sql_content .= "DROP TABLE IF EXISTS `$table_name`;\n";
             $sql_content .= $create_table[1] . ";\n\n";
 
-            // Get table data
-            $rows = $wpdb->get_results("SELECT * FROM `$table_name`", ARRAY_A);
-            if (!empty($rows)) {
-                $sql_content .= "-- Data for $table_display\n";
-
-                // Handle options table specially
-                if ($table_display === 'options') {
-                    $rows = $this->filter_options_table($rows);
-                }
-
-                foreach ($rows as $row) {
-                    $escaped_values = array();
-                    foreach ($row as $value) {
-                        if ($value === null) {
-                            $escaped_values[] = 'NULL';
-                        } else {
-                            $escaped_values[] = "'" . $wpdb->_real_escape($value) . "'";
-                        }
-                    }
-                    $sql_content .= "INSERT INTO `$table_name` VALUES (" . implode(",", $escaped_values) . ");\n";
-                }
-            }
+            // Export table data
+            $sql_content .= $this->export_table_data($table_name, $table_display);
         }
 
         return $sql_content;
     }
 
     /**
-     * Filter options table to exclude siteurl, home, and transients
+     * Export table data using WordPress native methods
      */
-    private function filter_options_table($rows) {
-        $filtered_rows = array();
+    private function export_table_data($table_name, $table_display) {
+        global $wpdb;
 
-        foreach ($rows as $row) {
-            $option_name = $row['option_name'];
+        $sql_content = "-- Data for $table_display\n";
 
-            // Skip siteurl and home
-            if (in_array($option_name, array('siteurl', 'home'))) {
-                continue;
-            }
+        // Get all rows from the table
+        $rows = $wpdb->get_results("SELECT * FROM `$table_name`", ARRAY_A);
 
-            // Skip transients
-            if (strpos($option_name, '_transient_') === 0 || strpos($option_name, '_site_transient_') === 0) {
-                continue;
-            }
-
-            $filtered_rows[] = $row;
+        if (empty($rows)) {
+            $sql_content .= "-- No data found\n\n";
+            return $sql_content;
         }
 
-        return $filtered_rows;
+        // Get column names
+        $columns = array_keys($rows[0]);
+        $column_list = '`' . implode('`, `', $columns) . '`';
+
+        // Build INSERT statements
+        foreach ($rows as $row) {
+            $values = array();
+            foreach ($row as $value) {
+                if ($value === null) {
+                    $values[] = 'NULL';
+                } else {
+                    // Properly escape the value
+                    $escaped_value = $wpdb->_real_escape($value);
+                    $values[] = "'$escaped_value'";
+                }
+            }
+
+            $sql_content .= "INSERT INTO `$table_name` ($column_list) VALUES (" . implode(', ', $values) . ");\n";
+        }
+
+        $sql_content .= "\n";
+        return $sql_content;
     }
+
+
+
+
 
     /**
      * Get preset display name

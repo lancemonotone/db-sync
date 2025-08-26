@@ -52,6 +52,7 @@ class DatabaseSync {
         add_action('wp_ajax_db_sync_restore', array($this->import, 'handle_restore'));
         add_action('wp_ajax_db_sync_delete', array($this->import, 'handle_delete'));
         add_action('wp_ajax_db_sync_check_files', array($this->import, 'handle_check_files'));
+        add_action('wp_ajax_db_sync_refresh_nonce', array($this, 'handle_refresh_nonce'));
     }
 
     /**
@@ -106,6 +107,20 @@ class DatabaseSync {
                 'tables' => array('posts', 'postmeta', 'terms', 'term_relationships', 'termmeta')
             )
         );
+    }
+
+    /**
+     * Handle nonce refresh AJAX request
+     */
+    public function handle_refresh_nonce() {
+        // Check permissions
+        if (!current_user_can('manage_options')) {
+            wp_die('Insufficient permissions');
+        }
+
+        wp_send_json_success(array(
+            'nonce' => wp_create_nonce('db_sync_nonce')
+        ));
     }
 }
 

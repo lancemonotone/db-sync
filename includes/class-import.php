@@ -4,6 +4,8 @@
  * Import functionality for Database Sync plugin
  */
 
+// No external dependencies needed - using WordPress native methods
+
 class DatabaseSync_Import {
 
     /**
@@ -48,9 +50,6 @@ class DatabaseSync_Import {
         if (is_wp_error($result)) {
             wp_send_json_error($result->get_error_message());
         }
-
-        // Delete file after successful import
-        unlink($file_path);
 
         // Add backup info to result
         $result['backup_file'] = $backup_result;
@@ -132,9 +131,6 @@ class DatabaseSync_Import {
             wp_send_json_error($result->get_error_message());
         }
 
-        // Delete backup file after successful restore
-        unlink($backup_path);
-
         wp_send_json_success($result);
     }
 
@@ -199,8 +195,11 @@ class DatabaseSync_Import {
                 'modified' => filemtime($file),
                 'preset' => $file_info['preset'],
                 'environment' => $file_info['environment'],
-                'date' => $file_info['date']
+                'date' => $file_info['date'],
+                'is_backup' => $file_info['is_backup']
             );
+
+            error_log('*** DB Sync: Added file to list: ' . $filename . ' (is_backup: ' . ($file_info['is_backup'] ? 'true' : 'false') . ')');
         }
 
         // Sort by modification time (newest first)
@@ -215,18 +214,42 @@ class DatabaseSync_Import {
      * Parse filename to extract information
      */
     public static function parse_filename($filename) {
-        // Format: 250825-development-local.sql or 250825-development-local-BAK.sql
-        if (preg_match('/^(\d{6})-([^-]+)-([^-]+)(-BAK)?\.sql$/', $filename, $matches)) {
+        // Format: 250825-143022-development-local.sql or 250825-143022-development-local-BAK.sql
+        if (preg_match('/^(\d{6})-(\d{6})-([^-]+)-([^-]+)(-BAK)?\.sql$/', $filename, $matches)) {
+            $is_backup = !empty($matches[5]);
+            $date = $matches[1];
+            $time = $matches[2];
+            $timestamp = $date . '-' . $time;
+            error_log('*** DB Sync: Parsed filename "' . $filename . '" - is_backup: ' . ($is_backup ? 'true' : 'false') . ', timestamp: ' . $timestamp);
             return array(
-                'date' => $matches[1],
-                'preset' => ucfirst(str_replace('-', ' ', $matches[2])),
-                'environment' => ucfirst($matches[3]),
-                'is_backup' => !empty($matches[4])
+                'date' => $date,
+                'time' => $time,
+                'timestamp' => $timestamp,
+                'preset' => ucfirst(str_replace('-', ' ', $matches[3])),
+                'environment' => ucfirst($matches[4]),
+                'is_backup' => $is_backup
             );
         }
 
+        // Fallback for old format: 250825-development-local.sql or 250825-development-local-BAK.sql
+        if (preg_match('/^(\d{6})-([^-]+)-([^-]+)(-BAK)?\.sql$/', $filename, $matches)) {
+            $is_backup = !empty($matches[4]);
+            error_log('*** DB Sync: Parsed filename (old format) "' . $filename . '" - is_backup: ' . ($is_backup ? 'true' : 'false'));
+            return array(
+                'date' => $matches[1],
+                'time' => '000000',
+                'timestamp' => $matches[1] . '-000000',
+                'preset' => ucfirst(str_replace('-', ' ', $matches[2])),
+                'environment' => ucfirst($matches[3]),
+                'is_backup' => $is_backup
+            );
+        }
+
+        error_log('*** DB Sync: Filename "' . $filename . '" did not match any expected pattern');
         return array(
             'date' => 'Unknown',
+            'time' => 'Unknown',
+            'timestamp' => 'Unknown',
             'preset' => 'Unknown',
             'environment' => 'Unknown',
             'is_backup' => false
@@ -234,20 +257,88 @@ class DatabaseSync_Import {
     }
 
     /**
-     * Import SQL content
+     * Split SQL content into individual statements
+     * Uses a more robust approach for WordPress content with serialized data
+     */
+    private function split_sql($sql_content) {
+        // Remove single-line comments
+        $sql_content = preg_replace('/--.*$/m', '', $sql_content);
+
+        // Remove multi-line comments
+        $sql_content = preg_replace('/\/\*.*?\*\//s', '', $sql_content);
+
+        // Use a more sophisticated approach to handle serialized data
+        $statements = array();
+        $current_statement = '';
+        $in_string = false;
+        $string_char = '';
+        $escaped = false;
+        $paren_depth = 0;
+
+        for ($i = 0; $i < strlen($sql_content); $i++) {
+            $char = $sql_content[$i];
+
+            // Handle escaped characters
+            if ($escaped) {
+                $current_statement .= $char;
+                $escaped = false;
+                continue;
+            }
+
+            if ($char === '\\') {
+                $escaped = true;
+                $current_statement .= $char;
+                continue;
+            }
+
+            // Track parentheses depth (for function calls, etc.)
+            if (!$in_string) {
+                if ($char === '(') {
+                    $paren_depth++;
+                } elseif ($char === ')') {
+                    $paren_depth--;
+                }
+            }
+
+            // Handle string literals
+            if (!$in_string && ($char === "'" || $char === '"')) {
+                $in_string = true;
+                $string_char = $char;
+                $current_statement .= $char;
+            } elseif ($in_string && $char === $string_char) {
+                $in_string = false;
+                $string_char = '';
+                $current_statement .= $char;
+            } else {
+                $current_statement .= $char;
+            }
+
+            // End of statement (only if not in a string and parentheses are balanced)
+            if (!$in_string && $paren_depth === 0 && $char === ';') {
+                $statement = trim($current_statement);
+                if (!empty($statement)) {
+                    $statements[] = $statement;
+                }
+                $current_statement = '';
+            }
+        }
+
+        // Add any remaining statement
+        $remaining = trim($current_statement);
+        if (!empty($remaining)) {
+            $statements[] = $remaining;
+        }
+
+        return array_filter($statements, function ($stmt) {
+            return !empty(trim($stmt)) && !preg_match('/^\s*$/', $stmt);
+        });
+    }
+
+    /**
+     * Import SQL content into the database - execute all statements in order
      */
     private function import_sql($sql_content) {
         global $wpdb;
-
-        // Extract source URL from SQL comments
-        $source_url = $this->extract_source_url($sql_content);
-        $target_url = get_option('siteurl');
-
-        // Replace URLs
-        $sql_content = $this->replace_urls($sql_content, $source_url, $target_url);
-
-        // Split SQL into individual statements
-        $statements = $this->split_sql($sql_content);
 
         $results = array(
             'tables_processed' => 0,
@@ -255,41 +346,41 @@ class DatabaseSync_Import {
             'errors' => array()
         );
 
-        // Begin transaction
+        // Remove comments
+        $sql_content = preg_replace('/--.*$/m', '', $sql_content);
+        $sql_content = preg_replace('/\/\*.*?\*\//s', '', $sql_content);
+
+        // Split by semicolon and execute each statement in order
+        $queries = explode(';', $sql_content);
+        $queries = array_filter(array_map('trim', $queries));
+
+        // Start transaction
         $wpdb->query('START TRANSACTION');
 
         try {
-            foreach ($statements as $index => $statement) {
-                $statement = trim($statement);
-                if (empty($statement) || strpos($statement, '--') === 0) {
-                    continue;
-                }
+            foreach ($queries as $query) {
+                if (empty($query)) continue;
 
-                // Debug: Log problematic statements
-                if (strlen($statement) > 200) {
-                    error_log("*** DB Sync: Processing statement " . ($index + 1) . " (length: " . strlen($statement) . ")");
-                }
-
-                $result = $wpdb->query($statement);
-
+                $result = $wpdb->query($query);
                 if ($result === false) {
-                    $error_msg = 'SQL Error: ' . $wpdb->last_error . ' in statement ' . ($index + 1) . ': ' . substr($statement, 0, 200);
-                    error_log("*** DB Sync: " . $error_msg);
-                    throw new Exception($error_msg);
+                    throw new Exception('SQL Error: ' . $wpdb->last_error);
                 }
 
-                if (strpos($statement, 'INSERT INTO') === 0) {
-                    $results['rows_imported']++;
-                } elseif (strpos($statement, 'CREATE TABLE') === 0) {
+                // Count for reporting
+                if (preg_match('/^CREATE TABLE/i', $query)) {
                     $results['tables_processed']++;
+                } elseif (preg_match('/^INSERT INTO/i', $query)) {
+                    $results['rows_imported']++;
                 }
             }
 
             // Commit transaction
             $wpdb->query('COMMIT');
+            error_log("*** DB Sync: Import completed - Tables: " . $results['tables_processed'] . ", Rows: " . $results['rows_imported']);
         } catch (Exception $e) {
             // Rollback transaction
             $wpdb->query('ROLLBACK');
+            error_log("*** DB Sync: Import failed - " . $e->getMessage());
             return new WP_Error('import_failed', $e->getMessage());
         }
 
@@ -300,101 +391,39 @@ class DatabaseSync_Import {
      * Generate preview of import
      */
     private function generate_preview($sql_content) {
-        // Extract source URL from SQL comments
-        $source_url = $this->extract_source_url($sql_content);
+        // Get target URL
         $target_url = get_option('siteurl');
 
-        // Count tables and rows
-        $tables = array();
+        // Use split_sql to get accurate counts
         $statements = $this->split_sql($sql_content);
+        $tables = array();
+        $total_rows = 0;
 
         foreach ($statements as $statement) {
-            if (preg_match('/CREATE TABLE `([^`]+)`/', $statement, $matches)) {
+            if (preg_match('/^CREATE\s+TABLE\s+`([^`]+)`/i', $statement, $matches)) {
                 $table_name = $matches[1];
                 $tables[$table_name] = 0;
-            } elseif (preg_match('/INSERT INTO `([^`]+)`/', $statement, $matches)) {
+            } elseif (preg_match('/^INSERT\s+INTO\s+`([^`]+)`/i', $statement, $matches)) {
                 $table_name = $matches[1];
                 if (isset($tables[$table_name])) {
                     $tables[$table_name]++;
+                } else {
+                    $tables[$table_name] = 1;
                 }
+                $total_rows++;
             }
         }
 
         return array(
-            'source_url' => $source_url,
             'target_url' => $target_url,
             'tables' => $tables,
-            'total_rows' => array_sum($tables)
+            'total_rows' => $total_rows
         );
     }
 
-    /**
-     * Extract source URL from SQL comments
-     */
-    private function extract_source_url($sql_content) {
-        if (preg_match('/-- Source URL: (.+)/', $sql_content, $matches)) {
-            return trim($matches[1]);
-        }
-        return '';
-    }
 
-    /**
-     * Replace URLs in SQL content
-     */
-    private function replace_urls($sql_content, $source_url, $target_url) {
-        if (empty($source_url) || empty($target_url) || $source_url === $target_url) {
-            return $sql_content;
-        }
 
-        // More robust URL replacement - only replace in string literals
-        $pattern = "/(['\"])([^'\"]*)" . preg_quote($source_url, '/') . "([^'\"]*)(['\"])/";
-        $replacement = '$1$2' . $target_url . '$3$4';
 
-        return preg_replace($pattern, $replacement, $sql_content);
-    }
-
-    /**
-     * Split SQL content into individual statements
-     */
-    private function split_sql($sql_content) {
-        // Remove comments
-        $sql_content = preg_replace('/--.*$/m', '', $sql_content);
-
-        // Split by semicolon, but be more careful about semicolons in strings
-        $statements = array();
-        $current_statement = '';
-        $in_string = false;
-        $string_char = '';
-
-        for ($i = 0; $i < strlen($sql_content); $i++) {
-            $char = $sql_content[$i];
-
-            if (!$in_string && ($char === "'" || $char === '"')) {
-                $in_string = true;
-                $string_char = $char;
-            } elseif ($in_string && $char === $string_char) {
-                // Check for escaped quote
-                if ($i > 0 && $sql_content[$i - 1] !== '\\') {
-                    $in_string = false;
-                    $string_char = '';
-                }
-            }
-
-            if (!$in_string && $char === ';') {
-                $statements[] = trim($current_statement);
-                $current_statement = '';
-            } else {
-                $current_statement .= $char;
-            }
-        }
-
-        // Add the last statement if it's not empty
-        if (!empty(trim($current_statement))) {
-            $statements[] = trim($current_statement);
-        }
-
-        return array_filter($statements);
-    }
 
     /**
      * Create backup of existing tables before import
@@ -405,8 +434,9 @@ class DatabaseSync_Import {
         // Parse import filename to get info
         $file_info = self::parse_filename($import_filename);
 
-        // Create backup filename
+        // Create backup filename - simple -BAK format
         $backup_filename = str_replace('.sql', '-BAK.sql', $import_filename);
+        error_log('*** DB Sync: Creating backup filename: ' . $backup_filename);
 
         // Get upload directory
         $upload_dir = wp_upload_dir();
@@ -421,7 +451,9 @@ class DatabaseSync_Import {
             return new WP_Error('no_tables', 'No tables found in import file');
         }
 
-        // Generate backup SQL
+        // Generate backup SQL using WordPress native methods
+        error_log('*** DB Sync: Creating backup using WordPress native methods for tables: ' . implode(', ', $tables_to_backup));
+
         $backup_sql = "-- WordPress Database Backup\n";
         $backup_sql .= "-- Generated: " . date('Y-m-d H:i:s') . "\n";
         $backup_sql .= "-- Backup before import: " . $import_filename . "\n";
@@ -431,50 +463,120 @@ class DatabaseSync_Import {
             // Check if table exists
             $table_exists = $wpdb->get_var("SHOW TABLES LIKE '$table_name'");
             if (!$table_exists) {
-                continue; // Skip if table doesn't exist
+                continue;
             }
 
             // Get table structure
             $create_table = $wpdb->get_row("SHOW CREATE TABLE `$table_name`", ARRAY_N);
-            if (!$create_table) {
-                continue;
-            }
+            if ($create_table) {
+                $backup_sql .= "\n-- Table structure for $table_name\n";
+                $backup_sql .= "DROP TABLE IF EXISTS `$table_name`;\n";
+                $backup_sql .= $create_table[1] . ";\n\n";
 
-            $backup_sql .= "\n-- Table structure for $table_name\n";
-            $backup_sql .= "DROP TABLE IF EXISTS `$table_name`;\n";
-            $backup_sql .= $create_table[1] . ";\n\n";
-
-            // Get table data
-            $rows = $wpdb->get_results("SELECT * FROM `$table_name`", ARRAY_A);
-            if (!empty($rows)) {
-                $backup_sql .= "-- Data for $table_name\n";
-
-                foreach ($rows as $row) {
-                    $escaped_values = array();
-                    foreach ($row as $value) {
-                        if ($value === null) {
-                            $escaped_values[] = 'NULL';
-                        } else {
-                            $escaped_values[] = "'" . $wpdb->_real_escape($value) . "'";
-                        }
-                    }
-                    $backup_sql .= "INSERT INTO `$table_name` VALUES (" . implode(",", $escaped_values) . ");\n";
-                }
+                // Export table data using WordPress methods
+                $backup_sql .= $this->export_table_data_for_backup($table_name);
             }
         }
 
-        // Save backup file
         $result = file_put_contents($backup_path, $backup_sql);
 
         if ($result === false) {
             return new WP_Error('backup_failed', 'Failed to save backup file');
         }
 
+        error_log('*** DB Sync: Backup file created successfully: ' . $backup_filename);
         return array(
             'filename' => $backup_filename,
-            'file_size' => size_format(strlen($backup_sql)),
+            'file_size' => size_format(filesize($backup_path)),
             'tables_backed_up' => count($tables_to_backup)
         );
+    }
+
+    /**
+     * Export table data for backup using WordPress native methods
+     */
+    private function export_table_data_for_backup($table_name) {
+        global $wpdb;
+
+        $sql_content = "-- Data for $table_name\n";
+
+        // Get all rows from the table
+        $rows = $wpdb->get_results("SELECT * FROM `$table_name`", ARRAY_A);
+
+        if (empty($rows)) {
+            $sql_content .= "-- No data found\n\n";
+            return $sql_content;
+        }
+
+        // Get column names
+        $columns = array_keys($rows[0]);
+        $column_list = '`' . implode('`, `', $columns) . '`';
+
+        // Build INSERT statements
+        foreach ($rows as $row) {
+            // Skip problematic data
+            if ($this->is_problematic_row_for_backup($row)) {
+                continue;
+            }
+
+            $values = array();
+            foreach ($row as $value) {
+                if ($value === null) {
+                    $values[] = 'NULL';
+                } else {
+                    // Properly escape the value
+                    $escaped_value = $wpdb->_real_escape($value);
+                    $values[] = "'$escaped_value'";
+                }
+            }
+
+            $sql_content .= "INSERT INTO `$table_name` ($column_list) VALUES (" . implode(', ', $values) . ");\n";
+        }
+
+        $sql_content .= "\n";
+        return $sql_content;
+    }
+
+
+
+    /**
+     * Check if a row contains problematic data that should be skipped during backup
+     */
+    private function is_problematic_row_for_backup($row) {
+        global $wpdb;
+
+        // Skip problematic options in options table
+        if (isset($row['option_name']) && $wpdb->options === $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->options}'")) {
+            $problematic_options = array(
+                '_transient_',
+                '_site_transient_',
+                'upload_url_path',
+                'upload_path',
+                'template',
+                'stylesheet',
+                'current_theme'
+            );
+
+            foreach ($problematic_options as $option) {
+                if (strpos($row['option_name'], $option) === 0) {
+                    return true;
+                }
+            }
+
+            // Preserve plugin's own options
+            if (strpos($row['option_name'], 'db_sync_') === 0) {
+                return false; // Keep plugin options
+            }
+        }
+
+        // Skip rows with malformed content
+        foreach ($row as $value) {
+            if (is_string($value) && strpos($value, '<!') !== false) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -485,7 +587,7 @@ class DatabaseSync_Import {
         $statements = $this->split_sql($sql_content);
 
         foreach ($statements as $statement) {
-            if (preg_match('/CREATE TABLE `([^`]+)`/', $statement, $matches)) {
+            if (preg_match('/^CREATE\s+TABLE\s+`([^`]+)`/i', $statement, $matches)) {
                 $tables[] = $matches[1];
             }
         }
@@ -513,12 +615,6 @@ class DatabaseSync_Import {
         // Get current files
         $current_files = self::get_available_files();
         error_log('*** DB Sync: Found ' . count($current_files) . ' current files');
-
-        // Add is_backup field to each file
-        foreach ($current_files as &$file) {
-            $file_info = self::parse_filename($file['filename']);
-            $file['is_backup'] = $file_info['is_backup'];
-        }
 
         // Get stored file list from option
         $stored_files = get_option('db_sync_stored_files', array());

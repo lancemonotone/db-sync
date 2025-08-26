@@ -271,6 +271,37 @@ input[type="file"] {
   background: #5a6268;
 }
 
+.restore-backup-btn {
+  position: absolute;
+  top: 50%;
+  right: 40px;
+  transform: translateY(-50%);
+  background: #0073aa;
+  color: white;
+  border: none;
+  border-radius: 3px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  z-index: 10;
+}
+
+.file-item:hover .restore-backup-btn {
+  opacity: 1;
+}
+
+.restore-backup-btn:hover {
+  background: #005a87;
+}
+
+.restore-backup-btn:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+
 /* Responsive design */
 @media (max-width: 768px) {
   .table-selection {

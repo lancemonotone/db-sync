@@ -319,7 +319,7 @@ jQuery(document).ready(function ($) {
             response.data.tables_processed +
             ", Rows: " +
             response.data.rows_imported +
-            ". SQL file has been deleted.";
+            ". Original SQL file preserved.";
 
           // Add backup information and restore button
           if (response.data.backup_file) {
@@ -341,10 +341,51 @@ jQuery(document).ready(function ($) {
 
           showResults(message, "success");
 
-          // Trigger a file check to update the import section
+          // Trigger a file check to update the import section (without showing messages)
           setTimeout(function () {
-            checkForFileChanges();
+            $.ajax({
+              url: dbSyncAjax.ajaxurl,
+              type: "POST",
+              data: {
+                action: "db_sync_check_files",
+                nonce: dbSyncAjax.nonce,
+              },
+              success: function (response) {
+                if (response.success) {
+                  updateFileList(response.data.files, false); // Don't show messages
+                }
+              },
+              error: function (xhr, status, error) {
+                console.log("*** File check failed:", error);
+              },
+            });
           }, 1000);
+
+          // Also trigger an immediate file list refresh
+          setTimeout(function () {
+            $.ajax({
+              url: dbSyncAjax.ajaxurl,
+              type: "POST",
+              data: {
+                action: "db_sync_check_files",
+                nonce: dbSyncAjax.nonce,
+              },
+              success: function (response) {
+                if (response.success) {
+                  updateFileList(response.data.files, false);
+                }
+              },
+              error: function (xhr, status, error) {
+                console.log(
+                  "*** File check failed, refreshing page to get new nonce"
+                );
+                // If nonce is invalid, refresh the page to get a new one
+                if (xhr.status === 400) {
+                  location.reload();
+                }
+              },
+            });
+          }, 500);
         } else {
           showResults("Import failed: " + response.data, "error");
         }
@@ -363,8 +404,19 @@ jQuery(document).ready(function ($) {
     var $results = $("#db-sync-results");
     var $content = $("#results-content");
 
-    $content.html(
-      '<div class="notice notice-' + type + '"><p>' + message + "</p></div>"
+    // Create a unique ID for this message
+    var messageId =
+      "message-" + Date.now() + "-" + Math.random().toString(36).substr(2, 9);
+
+    // Append the new message instead of replacing
+    $content.append(
+      '<div id="' +
+        messageId +
+        '" class="notice notice-' +
+        type +
+        '"><p>' +
+        message +
+        "</p></div>"
     );
     $results.show();
 
@@ -376,9 +428,15 @@ jQuery(document).ready(function ($) {
       500
     );
 
-    // Auto-hide after 10 seconds
+    // Auto-hide this specific message after 10 seconds
     setTimeout(function () {
-      $results.fadeOut(250);
+      $("#" + messageId).fadeOut(250, function () {
+        $(this).remove();
+        // Hide the results container if no messages remain
+        if ($content.children().length === 0) {
+          $results.hide();
+        }
+      });
     }, 10000);
   }
 
@@ -422,7 +480,7 @@ jQuery(document).ready(function ($) {
               response.data.tables_processed +
               ", Rows: " +
               response.data.rows_imported +
-              ". Backup file has been deleted.",
+              ". Backup file preserved.",
             "success"
           );
 
@@ -559,11 +617,12 @@ jQuery(document).ready(function ($) {
             shouldUpdate = true;
           }
 
+          // Update file list only if there are changes or if DOM doesn't match
           if (shouldUpdate) {
-            console.log("*** File changes detected, updating file list");
-            updateFileList(response.data.files, response.data.changed); // Only show message if changed flag is true
+            console.log("*** Updating file list due to changes");
+            updateFileList(response.data.files, response.data.changed);
           } else {
-            console.log("*** No file changes detected, skipping update");
+            console.log("*** No changes detected, skipping file list update");
           }
         } else {
           console.log("*** File check failed:", response.data);
@@ -655,7 +714,33 @@ jQuery(document).ready(function ($) {
   function createFileItemHtml(file, isSelected, isBackup) {
     var selectedClass = isSelected ? "selected" : "";
     var backupClass = isBackup ? "backup-file" : "";
-    var fileDate = new Date(file.modified * 1000).toLocaleString();
+
+    // Format the timestamp from filename for display
+    var displayDate = "";
+    if (file.date && file.time) {
+      // Convert YYMMDD-HHMMSS to readable format
+      var year = "20" + file.date.substring(0, 2);
+      var month = file.date.substring(2, 4);
+      var day = file.date.substring(4, 6);
+      var hour = file.time.substring(0, 2);
+      var minute = file.time.substring(2, 4);
+      var second = file.time.substring(4, 6);
+      displayDate =
+        month +
+        "/" +
+        day +
+        "/" +
+        year +
+        " " +
+        hour +
+        ":" +
+        minute +
+        ":" +
+        second;
+    } else {
+      // Fallback to file modification time
+      displayDate = new Date(file.modified * 1000).toLocaleString();
+    }
 
     var html =
       '<div class="file-item ' +
@@ -671,12 +756,21 @@ jQuery(document).ready(function ($) {
     html += '<span class="file-preset">' + file.preset + "</span>";
     html += '<span class="file-environment">' + file.environment + "</span>";
     html += '<span class="file-size">' + file.file_size + "</span>";
-    html += '<span class="file-date">' + fileDate + "</span>";
+    html += '<span class="file-date">' + displayDate + "</span>";
     if (isBackup) {
       html += '<span class="file-type">Backup</span>';
     }
     html += "</div>";
     html += "</div>";
+
+    if (isBackup) {
+      // Add restore button for backup files
+      html +=
+        '<button type="button" class="restore-backup-btn" data-filename="' +
+        file.filename +
+        '" title="Restore from backup">Restore</button>';
+    }
+
     html +=
       '<button type="button" class="delete-file-btn" data-filename="' +
       file.filename +
@@ -701,6 +795,70 @@ jQuery(document).ready(function ($) {
 
         $(".file-item").removeClass("selected");
         $(this).addClass("selected");
+      });
+
+    // Restore backup button
+    $(".restore-backup-btn")
+      .off("click")
+      .on("click", function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        var $btn = $(this);
+        var backupFilename = $btn.data("filename");
+        var originalText = $btn.text();
+
+        // Confirm restore
+        if (
+          !confirm(
+            "This will restore the database to its state before the import. Are you sure you want to continue?"
+          )
+        ) {
+          return;
+        }
+
+        // Show loading state
+        $btn.text("Restoring...").prop("disabled", true);
+
+        // Collect form data
+        var formData = new FormData();
+        formData.append("action", "db_sync_restore");
+        formData.append("nonce", dbSyncAjax.nonce);
+        formData.append("backup_filename", backupFilename);
+
+        // Send restore request
+        $.ajax({
+          url: dbSyncAjax.ajaxurl,
+          type: "POST",
+          data: formData,
+          processData: false,
+          contentType: false,
+          success: function (response) {
+            if (response.success) {
+              showResults(
+                "Backup restored successfully! Tables: " +
+                  response.data.tables_processed +
+                  ", Rows: " +
+                  response.data.rows_imported +
+                  ". Backup file preserved.",
+                "success"
+              );
+
+              // Refresh file list after restore
+              setTimeout(function () {
+                checkForFileChanges();
+              }, 1000);
+            } else {
+              showResults("Restore failed: " + response.data, "error");
+            }
+          },
+          error: function () {
+            showResults("Restore failed. Please try again.", "error");
+          },
+          complete: function () {
+            $btn.text(originalText).prop("disabled", false);
+          },
+        });
       });
   }
 
