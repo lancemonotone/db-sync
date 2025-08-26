@@ -124,18 +124,15 @@ class DatabaseSync_Admin {
                 <div class="db-sync-section">
                     <h2>Import Database</h2>
                     <div id="import-file-selection">
-                        <?php
-                        $available_files = DatabaseSync_Import::get_available_files();
-                        if (empty($available_files)):
-                        ?>
-                            <div class="no-files-message">
+                        <div class="file-selection">
+                            <h3>Available SQL Files</h3>
+                            <div class="no-files-message" <?php if (!empty(DatabaseSync_Import::get_available_files())) echo ' style="display: none;"'; ?>>
                                 <p>No SQL files found. Export a database first to see available files here.</p>
                             </div>
-                        <?php else: ?>
-                            <div class="file-selection">
-                                <h3>Available SQL Files</h3>
-                                <div class="file-list">
-                                    <?php
+                            <div class="file-list">
+                                <?php
+                                $available_files = DatabaseSync_Import::get_available_files();
+                                if (!empty($available_files)):
                                     $import_files = array();
                                     $backup_files = array();
 
@@ -152,7 +149,7 @@ class DatabaseSync_Admin {
                                             $import_files[] = $file;
                                         }
                                     }
-                                    ?>
+                                ?>
 
                                     <!-- Import Files -->
                                     <?php if (!empty($import_files)): ?>
@@ -190,14 +187,14 @@ class DatabaseSync_Admin {
                                             </div>
                                         <?php endforeach; ?>
                                     <?php endif; ?>
-                                </div>
+                                <?php endif; ?>
                             </div>
 
-                            <p class="submit">
+                            <p class="submit" <?php if (empty($available_files)) echo ' style="display: none;"'; ?>>
                                 <button type="button" id="preview-import" class="button">Preview Changes</button>
                                 <button type="button" id="import-database" class="button button-primary">Import Database</button>
                             </p>
-                        <?php endif; ?>
+                        </div>
                     </div>
                 </div>
 

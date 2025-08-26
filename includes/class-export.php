@@ -30,7 +30,8 @@ class DatabaseSync_Export {
         update_option('db_sync_preset', $preset);
         update_option('db_sync_tables', $tables_to_export);
 
-        // Generate SQL file
+        // Generate SQL file  
+        error_log('*** DB Sync Export: Using fixed escaping logic');
         $sql_content = $this->generate_sql($tables_to_export);
 
         // Create descriptive filename
@@ -121,8 +122,15 @@ class DatabaseSync_Export {
                 }
 
                 foreach ($rows as $row) {
-                    $values = array_map(array($wpdb, '_real_escape'), $row);
-                    $sql_content .= "INSERT INTO `$table_name` VALUES ('" . implode("','", $values) . "');\n";
+                    $escaped_values = array();
+                    foreach ($row as $value) {
+                        if ($value === null) {
+                            $escaped_values[] = 'NULL';
+                        } else {
+                            $escaped_values[] = "'" . $wpdb->_real_escape($value) . "'";
+                        }
+                    }
+                    $sql_content .= "INSERT INTO `$table_name` VALUES (" . implode(",", $escaped_values) . ");\n";
                 }
             }
         }

@@ -136,10 +136,10 @@ jQuery(document).ready(function ($) {
             "success"
           );
 
-          // Refresh the import section to show the new file
+          // Trigger a file check to update the import section
           setTimeout(function () {
-            location.reload();
-          }, 2000);
+            checkForFileChanges();
+          }, 1000);
         } else {
           showResults("Export failed: " + response.data, "error");
         }
@@ -206,11 +206,10 @@ jQuery(document).ready(function ($) {
           $fileItem.fadeOut(300, function () {
             $(this).remove();
 
-            // Check if there are any files left
-            var remainingFiles = $(".file-item").length;
-            if (remainingFiles === 0) {
-              // Refresh the page to show "no files" message
-              location.reload();
+            // Check if we need to show "no files" message
+            if ($(".file-item").length === 0) {
+              $(".no-files-message").show();
+              $("#import-file-selection .submit").hide();
             }
           });
 
@@ -342,10 +341,10 @@ jQuery(document).ready(function ($) {
 
           showResults(message, "success");
 
-          // Refresh the page to update file list
+          // Trigger a file check to update the import section
           setTimeout(function () {
-            location.reload();
-          }, 2000);
+            checkForFileChanges();
+          }, 1000);
         } else {
           showResults("Import failed: " + response.data, "error");
         }
@@ -376,6 +375,11 @@ jQuery(document).ready(function ($) {
       },
       500
     );
+
+    // Auto-hide after 10 seconds
+    setTimeout(function () {
+      $results.fadeOut(250);
+    }, 10000);
   }
 
   // Handle restore button (delegated event)
@@ -422,10 +426,10 @@ jQuery(document).ready(function ($) {
             "success"
           );
 
-          // Refresh the page to update file list
+          // Trigger a file check to update the import section
           setTimeout(function () {
-            location.reload();
-          }, 2000);
+            checkForFileChanges();
+          }, 1000);
         } else {
           showResults("Restore failed: " + response.data, "error");
         }
@@ -518,6 +522,7 @@ jQuery(document).ready(function ($) {
 
   // Check for file changes
   function checkForFileChanges() {
+    console.log("*** checkForFileChanges() called");
     $.ajax({
       url: dbSyncAjax.ajaxurl,
       type: "POST",
@@ -528,26 +533,53 @@ jQuery(document).ready(function ($) {
       success: function (response) {
         if (response.success) {
           console.log("*** File check response:", response.data);
+          console.log(
+            "*** Files count:",
+            response.data.files ? response.data.files.length : 0
+          );
+          console.log("*** Changed flag:", response.data.changed);
 
-          // Always update file list if files are present, regardless of change detection
-          if (response.data.files && response.data.files.length > 0) {
-            console.log("*** Files detected, updating file list");
-            updateFileList(response.data.files);
-          } else if (response.data.changed) {
-            console.log("*** File changes detected, updating file list");
-            updateFileList(response.data.files);
+          // Check if we need to update the UI
+          var shouldUpdate = response.data.changed;
+
+          // Also check if current DOM doesn't match the returned files
+          var currentFileItems = $(".file-item").length;
+          var responseFileCount = response.data.files
+            ? response.data.files.length
+            : 0;
+
+          if (currentFileItems !== responseFileCount) {
+            console.log(
+              "*** DOM file count (" +
+                currentFileItems +
+                ") doesn't match response (" +
+                responseFileCount +
+                "), forcing update"
+            );
+            shouldUpdate = true;
           }
+
+          if (shouldUpdate) {
+            console.log("*** File changes detected, updating file list");
+            updateFileList(response.data.files, response.data.changed); // Only show message if changed flag is true
+          } else {
+            console.log("*** No file changes detected, skipping update");
+          }
+        } else {
+          console.log("*** File check failed:", response.data);
         }
       },
       error: function (xhr, status, error) {
         console.log("*** File polling error:", error);
+        console.log("*** XHR details:", xhr.responseText);
       },
     });
   }
 
   // Update file list in the DOM
-  function updateFileList(files) {
+  function updateFileList(files, showMessage) {
     console.log("*** updateFileList called with files:", files);
+    console.log("*** Show message:", showMessage);
 
     var $fileList = $(".file-list");
     var $noFilesMessage = $(".no-files-message");
@@ -559,11 +591,16 @@ jQuery(document).ready(function ($) {
       // No files, show message
       $fileList.empty();
       $noFilesMessage.show();
+      $("#import-file-selection .submit").hide(); // Hide import buttons when no files
+      if (showMessage) {
+        showResults("File list updated - all files removed", "success");
+      }
       return;
     }
 
-    // Hide no files message
+    // Hide no files message and show submit buttons
     $noFilesMessage.hide();
+    $("#import-file-selection .submit").show();
 
     // Clear existing files
     $fileList.empty();
@@ -608,8 +645,10 @@ jQuery(document).ready(function ($) {
     // Re-attach event handlers
     attachFileEventHandlers();
 
-    // Show notification
-    showResults("File list updated - new files detected", "success");
+    // Show notification only if requested and there are changes
+    if (showMessage) {
+      showResults("File list updated - changes detected", "success");
+    }
   }
 
   // Create HTML for file item

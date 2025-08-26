@@ -450,8 +450,15 @@ class DatabaseSync_Import {
                 $backup_sql .= "-- Data for $table_name\n";
 
                 foreach ($rows as $row) {
-                    $values = array_map(array($wpdb, '_real_escape'), $row);
-                    $backup_sql .= "INSERT INTO `$table_name` VALUES ('" . implode("','", $values) . "');\n";
+                    $escaped_values = array();
+                    foreach ($row as $value) {
+                        if ($value === null) {
+                            $escaped_values[] = 'NULL';
+                        } else {
+                            $escaped_values[] = "'" . $wpdb->_real_escape($value) . "'";
+                        }
+                    }
+                    $backup_sql .= "INSERT INTO `$table_name` VALUES (" . implode(",", $escaped_values) . ");\n";
                 }
             }
         }
@@ -500,8 +507,12 @@ class DatabaseSync_Import {
             wp_die('Insufficient permissions');
         }
 
+        // Debug: Log when file check is called
+        error_log('*** DB Sync: handle_check_files() called');
+
         // Get current files
         $current_files = self::get_available_files();
+        error_log('*** DB Sync: Found ' . count($current_files) . ' current files');
 
         // Add is_backup field to each file
         foreach ($current_files as &$file) {
@@ -511,6 +522,13 @@ class DatabaseSync_Import {
 
         // Get stored file list from option
         $stored_files = get_option('db_sync_stored_files', array());
+        error_log('*** DB Sync: Found ' . count($stored_files) . ' stored file hashes');
+
+        // Special case: If this is the first check (no stored files), mark as changed
+        $is_first_check = empty($stored_files) && !empty($current_files);
+        if ($is_first_check) {
+            error_log('*** DB Sync: First check detected (no stored files but current files exist), marking as changed');
+        }
 
         // Compare current files with stored files
         $changed = false;
@@ -519,16 +537,39 @@ class DatabaseSync_Import {
         foreach ($current_files as $file) {
             $file_hash = $file['filename'] . '|' . $file['modified'] . '|' . $file['file_size'];
             $file_hashes[] = $file_hash;
+            error_log('*** DB Sync: Current file hash: ' . $file_hash);
 
             if (!in_array($file_hash, $stored_files)) {
+                error_log('*** DB Sync: File hash not found in stored files, marking as changed: ' . $file_hash);
                 $changed = true;
             }
         }
 
-        // Check if any stored files are missing
+        // Debug stored files
+        foreach ($stored_files as $stored_hash) {
+            error_log('*** DB Sync: Stored file hash: ' . $stored_hash);
+        }
+
+        // Check if any stored files are missing (file count changed)
         if (count($stored_files) !== count($file_hashes)) {
+            error_log('*** DB Sync: File count changed from ' . count($stored_files) . ' to ' . count($file_hashes) . ', marking as changed');
             $changed = true;
         }
+
+        // Check for deleted files (hashes that exist in stored but not in current)
+        foreach ($stored_files as $stored_hash) {
+            if (!in_array($stored_hash, $file_hashes)) {
+                error_log('*** DB Sync: Stored file hash no longer exists, marking as changed: ' . $stored_hash);
+                $changed = true;
+            }
+        }
+
+        // Apply first check logic
+        if ($is_first_check) {
+            $changed = true;
+        }
+
+        error_log('*** DB Sync: Final changed status: ' . ($changed ? 'true' : 'false'));
 
         // Update stored file list
         update_option('db_sync_stored_files', $file_hashes);
